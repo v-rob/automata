@@ -536,7 +536,7 @@ minetest.register_tool("automata:stepper", {
 
 					if not valid then
 						minetest.chat_send_player(player, "Error: This nondeterministic " ..
-								"transition does not match the input")
+								"transition cannot be applied")
 					end
 				else
 					minetest.chat_send_player(player, "Error: Nondeterministic transition: " ..

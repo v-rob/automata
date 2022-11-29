@@ -43,6 +43,8 @@ function automata.get_states(init_pos)
 	return states, starts
 end
 
+-- The list of metadata items found in each automata's start state blocks. Each
+-- is prefixed with "automata_" in the actual metadata.
 automata.start_meta = {
 	"class",
 	"nondet",
@@ -94,6 +96,13 @@ function automata.get_meta(init_pos)
 			end
 		end
 	end
+
+	-- If we found no start state, this is probably an isolated node. Just get
+	-- the metadata from it; although it will be empty, this function will
+	-- return appropriate details, although we need to fill in the error.
+	local data = automata.get_node_meta(init_pos)
+	data.errors = automata.format_errors{"No start state"}
+	return data
 end
 
 function automata.update_infotext(init_pos)
@@ -106,7 +115,7 @@ function automata.update_infotext(init_pos)
 
 	if data.class ~= "invalid" then
 		local bar_input = data.input
-		if data.class ~= "turing" then
+		if data.class ~= "turing" and data.state ~= "idle" then
 			bar_input = data.input:sub(1, data.pos - 1) .. "|" .. data.input:sub(data.pos)
 		end
 		table.insert(infotext, "Input: " .. bar_input)
@@ -173,8 +182,12 @@ function automata.reset(init_pos)
 	local _, starts = automata.get_states(init_pos)
 	for _, state_group in ipairs(starts) do
 		for _, start_pos in ipairs(state_group) do
+			-- This function can be used on an invalid automaton, so we have to
+			-- explicitly check if each state block is a start state.
 			local start_info = automata.get_node_info(start_pos)
-			minetest.swap_node(start_pos, {name = start_info.idle_name})
+			if start_info.start then
+				minetest.swap_node(start_pos, {name = start_info.idle_name})
+			end
 		end
 	end
 
@@ -188,6 +201,7 @@ function automata.reset(init_pos)
 	})
 end
 
+-- The order that transition actions must appear in leading out from the state.
 automata.transition_order = {
 	read = 1,
 	write = 2,
@@ -198,63 +212,88 @@ automata.transition_order = {
 }
 
 function automata.follow_trans(read_pos)
+	-- These are our return values: the table of special actions to perform
+	-- during the transition, all the nodes in the transition, and the states
+	-- the transition ends in (multiple since the automata might be erroneous).
 	local specials = {}
 	local conns = {read_pos}
 	local states = {}
 
+	-- Quick local reference to a hefty name.
 	local order = automata.transition_order
+
+	-- Keep track of the last special action found since we need to find them in
+	-- the right order or it's an error.
 	local last_spec = order.read
+
+	-- Keep a set of the found states so `automata.get_state_group()` doesn't
+	-- have overlaps.
 	local found_states = {}
 
-	local check_conn = function(next_pos, next_info)
-		if next_info.state or next_info.read then
-			return false
-		end
-
-		if last_spec == order.conn then
-			if not next_info.conn then
-				return false
-			end
-		else
-			local this_spec
-			if next_info.write then
-				specials.write = next_info
-				this_spec = order.write
-			elseif next_info.move then
-				specials.move = next_info
-				this_spec = order.move
-			elseif next_info.pop then
-				specials.pop = next_info
-				this_spec = order.pop
-			elseif next_info.push then
-				specials.push = next_info
-				this_spec = order.push
-			elseif next_info.conn then
-				this_spec = order.conn
-			end
-
-			if last_spec >= this_spec and last_spec ~= order.conn then
-				specials.invalid = true
-			end
-			last_spec = this_spec
-		end
-
-		table.insert(conns, next_pos)
-		return true
-	end
-
+	-- First, look at the nodes just around the read node: we want to ignore the
+	-- state that's right next to it because that's the state we came from.
 	automata.around(read_pos, function(conn_pos, conn_info)
 		if conn_info.state then
 			return
 		end
 
+		-- Then, search until we find all our destination states.
 		automata.recurse(conn_pos, function(next_pos, next_info)
+			-- If the next node is a state we haven't found yet, add it to the
+			-- list of states.
 			local next_hash = minetest.hash_node_position(next_pos)
 			if next_info.state and not found_states[next_hash] then
 				table.insert(states, automata.get_state_group(next_pos, found_states))
 				return false
 			end
-			return check_conn(next_pos, next_info)
+
+			-- If we find a read node, this is the start of another transition:
+			-- don't search through it.
+			if next_info.read then
+				return false
+			end
+
+			-- Perform checks for special actions.
+			if last_spec == order.conn then
+				-- If we've already found all the special actions and have found
+				-- some connectors, don't include any other special actions in
+				-- our search: they're probably part of other transitions.
+				if not next_info.conn then
+					return false
+				end
+			else
+				-- Store the special info in its proper place in the specials
+				-- table.
+				local this_spec
+				if next_info.write then
+					specials.write = next_info
+					this_spec = order.write
+				elseif next_info.move then
+					specials.move = next_info
+					this_spec = order.move
+				elseif next_info.pop then
+					specials.pop = next_info
+					this_spec = order.pop
+				elseif next_info.push then
+					specials.push = next_info
+					this_spec = order.push
+				elseif next_info.conn then
+					this_spec = order.conn
+				end
+
+				-- Compare the last order to this one. If it's greater or the
+				-- same, we've got a erroneous duplicate or out-of-order special
+				-- action in this transition. Signal this to the caller.
+				if last_spec >= this_spec then
+					specials.invalid = true
+				end
+				last_spec = this_spec
+			end
+
+			-- Finally, add this connector to the list of connectors and
+			-- continue on.
+			table.insert(conns, next_pos)
+			return true
 		end)
 	end)
 
@@ -355,7 +394,7 @@ function automata.refresh(init_pos)
 	if #errors ~= 0 then
 		auto_class = "invalid"
 		auto_nondet = false
-		auto_errors = "* " .. table.concat(errors, "\n* ")
+		auto_errors = automata.format_errors(errors)
 	end
 
 	automata.set_meta(init_pos, {

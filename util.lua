@@ -81,3 +81,7 @@ function automata.recurse(init_pos, func)
 		end
 	end
 end
+
+function automata.format_errors(errors)
+	return "* " .. table.concat(errors, "\n* ")
+end
