@@ -415,8 +415,11 @@ function automata.can_trans(read_pos)
 		tape_char = "_"
 	end
 
+	local is_valid_gamma = read_info.char == "gamma" and
+			(data.class == "turing" or tape_char ~= "_")
+
 	if read_info.value ~= tape_char and
-			read_info.char ~= "gamma" and read_info.char ~= "lambda" then
+			not is_valid_gamma and read_info.char ~= "lambda" then
 		return false
 	end
 
